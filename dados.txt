@@ -1,2 +1,0 @@
-geraldo;20
-sense;20;2

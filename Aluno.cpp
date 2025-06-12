@@ -1,14 +1,148 @@
 #include <iostream>
-#include <fstream>
 #include <vector>
 #include <string>
 #include <sstream>
+#include <iomanip>
+#include "sqlite3.h"
 
 using namespace std;
 
 struct Aluno {
+    int id;
     string nome;
     vector<float> notas;
+};
+
+class SistemaAlunos {
+private:
+    sqlite3* db;
+    
+public:
+    SistemaAlunos() : db(nullptr) {}
+    
+    ~SistemaAlunos() {
+        if (db) {
+            sqlite3_close(db);
+        }
+    }
+    
+    bool inicializar() {
+        int rc = sqlite3_open("alunos.db", &db);
+        if (rc != SQLITE_OK) {
+            cout << "Erro ao abrir banco de dados: " << sqlite3_errmsg(db) << endl;
+            return false;
+        }
+        
+        // Criar tabelas se não existirem
+        const char* sql = R"(
+            CREATE TABLE IF NOT EXISTS alunos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome TEXT NOT NULL
+            );
+            
+            CREATE TABLE IF NOT EXISTS notas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                aluno_id INTEGER,
+                nota REAL NOT NULL,
+                FOREIGN KEY (aluno_id) REFERENCES alunos (id)
+            );
+        )";
+        
+        char* errMsg = nullptr;
+        rc = sqlite3_exec(db, sql, nullptr, nullptr, &errMsg);
+        
+        if (rc != SQLITE_OK) {
+            cout << "Erro ao criar tabelas: " << errMsg << endl;
+            sqlite3_free(errMsg);
+            return false;
+        }
+        
+        return true;
+    }
+    
+    void carregarAlunos(vector<Aluno>& alunos) {
+        alunos.clear();
+        
+        const char* sql = R"(
+            SELECT a.id, a.nome, n.nota
+            FROM alunos a
+            LEFT JOIN notas n ON a.id = n.aluno_id
+            ORDER BY a.id, n.id;
+        )";
+        
+        sqlite3_stmt* stmt;
+        int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+        
+        if (rc != SQLITE_OK) {
+            cout << "Erro ao carregar alunos: " << sqlite3_errmsg(db) << endl;
+            return;
+        }
+        
+        int currentId = -1;
+        Aluno* currentAluno = nullptr;
+        
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int id = sqlite3_column_int(stmt, 0);
+            const char* nome = (const char*)sqlite3_column_text(stmt, 1);
+            
+            if (id != currentId) {
+                // Novo aluno
+                Aluno a;
+                a.id = id;
+                a.nome = nome;
+                a.notas.clear();
+                alunos.push_back(a);
+                currentAluno = &alunos.back();
+                currentId = id;
+            }
+            
+            // Adicionar nota se existir
+            if (sqlite3_column_type(stmt, 2) != SQLITE_NULL) {
+                float nota = sqlite3_column_double(stmt, 2);
+                currentAluno->notas.push_back(nota);
+            }
+        }
+        
+        sqlite3_finalize(stmt);
+    }
+    
+    void salvarAlunos(const vector<Aluno>& alunos) {
+        // Limpar banco de dados
+        const char* sqlClear = "DELETE FROM notas; DELETE FROM alunos;";
+        char* errMsg = nullptr;
+        sqlite3_exec(db, sqlClear, nullptr, nullptr, &errMsg);
+        if (errMsg) sqlite3_free(errMsg);
+        
+        // Inserir alunos e notas
+        for (const Aluno& a : alunos) {
+            // Inserir aluno
+            const char* sqlAluno = "INSERT INTO alunos (nome) VALUES (?);";
+            sqlite3_stmt* stmtAluno;
+            
+            int rc = sqlite3_prepare_v2(db, sqlAluno, -1, &stmtAluno, nullptr);
+            if (rc == SQLITE_OK) {
+                sqlite3_bind_text(stmtAluno, 1, a.nome.c_str(), -1, SQLITE_STATIC);
+                sqlite3_step(stmtAluno);
+                sqlite3_finalize(stmtAluno);
+                
+                int alunoId = sqlite3_last_insert_rowid(db);
+                
+                // Inserir notas
+                for (float nota : a.notas) {
+                    const char* sqlNota = "INSERT INTO notas (aluno_id, nota) VALUES (?, ?);";
+                    sqlite3_stmt* stmtNota;
+                    
+                    rc = sqlite3_prepare_v2(db, sqlNota, -1, &stmtNota, nullptr);
+                    if (rc == SQLITE_OK) {
+                        sqlite3_bind_int(stmtNota, 1, alunoId);
+                        sqlite3_bind_double(stmtNota, 2, nota);
+                        sqlite3_step(stmtNota);
+                        sqlite3_finalize(stmtNota);
+                    }
+                }
+            }
+        }
+    }
 };
 
 float calcularMedia(const vector<float>& notas) {
@@ -18,42 +152,16 @@ float calcularMedia(const vector<float>& notas) {
     return notas.empty() ? 0 : soma / notas.size();
 }
 
-void carregarAlunos(vector<Aluno>& alunos, const string& nomeArquivo) {
-    ifstream arquivo(nomeArquivo);
-    if (!arquivo.is_open()) return;
-
-    string linha;
-    while (getline(arquivo, linha)) {
-        stringstream ss(linha);
-        string token;
-        Aluno a;
-
-        getline(ss, a.nome, ';');
-        while (getline(ss, token, ';')) {
-            a.notas.push_back(stof(token));
-        }
-        alunos.push_back(a);
-    }
-
-    arquivo.close();
-}
-
-void salvarAlunos(const vector<Aluno>& alunos, const string& nomeArquivo) {
-    ofstream arquivo(nomeArquivo);
-    for (const Aluno& a : alunos) {
-        arquivo << a.nome;
-        for (float nota : a.notas)
-            arquivo << ";" << nota;
-        arquivo << "\n";
-    }
-    arquivo.close();
-}
-
 int main() {
     vector<Aluno> alunos;
-    const string nomeArquivo = "dados.txt";
-
-    carregarAlunos(alunos, nomeArquivo);
+    SistemaAlunos sistema;
+    
+    if (!sistema.inicializar()) {
+        cout << "Erro ao inicializar o sistema!" << endl;
+        return 1;
+    }
+    
+    sistema.carregarAlunos(alunos);
 
     int opcao;
     do {
@@ -75,17 +183,32 @@ int main() {
 
             int numNotas;
             cout << "Quantas notas? ";
-            cin >> numNotas;
+            
+            // Validação de entrada
+            if (!(cin >> numNotas) || numNotas <= 0) {
+                cout << "Número inválido! Digite um número positivo.\n";
+                cin.clear();
+                cin.ignore(10000, '\n');
+                continue; // Voltar ao menu
+            }
 
             for (int i = 0; i < numNotas; ++i) {
                 float nota;
                 cout << "Nota " << i + 1 << ": ";
-                cin >> nota;
+                
+                // Validação de entrada
+                if (!(cin >> nota) || nota < 0 || nota > 10) {
+                    cout << "Nota inválida! Digite um número entre 0 e 10.\n";
+                    cin.clear();
+                    cin.ignore(10000, '\n');
+                    i--; // Tentar novamente
+                    continue;
+                }
                 a.notas.push_back(nota);
             }
 
             alunos.push_back(a);
-            salvarAlunos(alunos, nomeArquivo);
+            sistema.salvarAlunos(alunos);
             cout << "\nAluno cadastrado com sucesso!\n";
             cin.ignore();
         } else if (opcao == 2) {
@@ -103,10 +226,13 @@ int main() {
 
             int indice;
             cout << "Escolha o número do aluno para atualizar: ";
-            cin >> indice;
-            cin.ignore();
-
-            if (indice < 1 || indice > alunos.size()) {
+            
+            // Validação de entrada para evitar loop infinito
+            if (!(cin >> indice)) {
+                cout << "Entrada inválida! Digite um número.\n";
+                cin.clear(); // Limpar flags de erro
+                cin.ignore(10000, '\n'); // Limpar buffer
+            } else if (indice < 1 || indice > alunos.size()) {
                 cout << "Índice inválido!\n";
             } else {
                 Aluno& a = alunos[indice - 1];
@@ -127,18 +253,33 @@ int main() {
                     a.notas.clear();
                     int numNotas;
                     cout << "Quantas novas notas? ";
-                    cin >> numNotas;
+                    
+                    // Validação de entrada
+                    if (!(cin >> numNotas) || numNotas <= 0) {
+                        cout << "Número inválido! Digite um número positivo.\n";
+                        cin.clear();
+                        cin.ignore(10000, '\n');
+                        continue; // Voltar ao menu
+                    }
 
                     for (int i = 0; i < numNotas; ++i) {
                         float nota;
                         cout << "Nota " << i + 1 << ": ";
-                        cin >> nota;
+                        
+                        // Validação de entrada
+                        if (!(cin >> nota) || nota < 0 || nota > 10) {
+                            cout << "Nota inválida! Digite um número entre 0 e 10.\n";
+                            cin.clear();
+                            cin.ignore(10000, '\n');
+                            i--; // Tentar novamente
+                            continue;
+                        }
                         a.notas.push_back(nota);
                     }
                     cin.ignore();
                 }
 
-                salvarAlunos(alunos, nomeArquivo);
+                sistema.salvarAlunos(alunos);
                 cout << "Aluno atualizado com sucesso!\n";
             }
         } else if (opcao == 4) {
@@ -149,13 +290,17 @@ int main() {
 
             int indice;
             cout << "Escolha o número do aluno para remover: ";
-            cin >> indice;
-
-            if (indice < 1 || indice > alunos.size()) {
+            
+            // Validação de entrada para evitar loop infinito
+            if (!(cin >> indice)) {
+                cout << "Entrada inválida! Digite um número.\n";
+                cin.clear(); // Limpar flags de erro
+                cin.ignore(10000, '\n'); // Limpar buffer
+            } else if (indice < 1 || indice > alunos.size()) {
                 cout << "Índice inválido!\n";
             } else {
                 alunos.erase(alunos.begin() + (indice - 1));
-                salvarAlunos(alunos, nomeArquivo);
+                sistema.salvarAlunos(alunos);
                 cout << "Aluno removido com sucesso!\n";
             }
             cin.ignore();
